@@ -1,0 +1,15 @@
+services:
+  ipfs:
+    image: docker.io/ipfs/kubo:latest
+    container_name: ipfs
+    restart: unless-stopped
+    volumes:
+      - ipfs_data:/data/ipfs
+      - ./website:/site:ro
+    ports:
+      - "4001:4001/tcp"
+      - "4001:4001/udp"
+      - "127.0.0.1:5001:5001"
+      - "127.0.0.1:8080:8080"
+volumes:
+  ipfs_data:
