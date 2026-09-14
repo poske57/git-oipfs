@@ -1,3 +1,3 @@
-module afabl.fyi/git-oipfs
+module afabl.eth/git-oipfs
 
 go 1.26.7
