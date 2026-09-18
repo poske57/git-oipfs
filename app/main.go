@@ -22,12 +22,9 @@ func main() {
 }
 
 func Reconciliation() error {
+	initialize()
 	// Check update
 	repositoryPath := os.Getenv("OIPFS_REPOSITORY_PATH")
-
-	if repositoryPath == "" {
-		repositoryPath = "../"
-	}
 	repo, err := git.PlainOpen(repositoryPath)
 	if err != nil {
 		return err
@@ -68,4 +65,38 @@ func isRepositoryUpdated(repo *git.Repository) (bool, error) {
 	}
 
 	return true, nil
+}
+
+func cloneIfNotExist() (repo, error) {
+	repositoryPath := os.Getenv("OIPFS_REPOSITORY_PATH")
+
+	_, err := git.PlainOpen(repositoryPath)
+
+	if errors.Is(err, git.ErrRepositoryNotExists) {
+		_, err := git.PlainClone(repositoryPath, &git.CloneOptions{
+			URL:           "https://github.com//example.git",
+			ReferenceName: "refs/heads/develop",
+			SingleBranch:  true,
+			Progress:      os.Stdout,
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type Settings struct {
+	repository          *git.Repository
+	repositoryUrl       string
+	reconciliationCycle int
+}
+
+func (s *Settings) loadSettings() error {
+	// repository
+	repositoryPath := os.Getenv("OIPFS_REPOSITORY_PATH")
+	// TODO: print custom error and panic
+	if repositoryPath == "" {
+		slog.Error("You must set OIPFS_REPOSITORY_PATH")
+	}
 }
