@@ -4,6 +4,7 @@ import (
 	"errors"
 	git "github.com/go-git/go-git/v6"
 	"log/slog"
+	"os"
 	"time"
 )
 
@@ -22,7 +23,11 @@ func main() {
 
 func Reconciliation() error {
 	// Check update
-	repositoryPath := "../"
+	repositoryPath := os.Getenv("OIPFS_REPOSITORY_PATH")
+
+	if repositoryPath == "" {
+		repositoryPath = "../"
+	}
 	repo, err := git.PlainOpen(repositoryPath)
 	if err != nil {
 		return err

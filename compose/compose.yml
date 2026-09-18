@@ -11,5 +11,14 @@ services:
       - "4001:4001/udp"
       - "127.0.0.1:5001:5001"
       - "127.0.0.1:8080:8080"
+  git-oipfs:
+    build:
+      context: ../app
+    container_name: git-oipfs
+    restart: unless-stopped
+    environment:
+      - OIPFS_REPOSITORY_PATH=/repo
+    volumes:
+      - ../:/repo:ro
 volumes:
   ipfs_data:
