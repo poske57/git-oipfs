@@ -28,13 +28,7 @@
         default = pkgs.mkShell {
           packages = with pkgs; [
             go
-            gotools
-            golangci-lint
           ];
-
-          shellHook = ''
-            echo "Go version: $(go version)"
-          '';
         };
       });
     };
