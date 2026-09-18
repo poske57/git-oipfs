@@ -19,6 +19,6 @@ services:
     environment:
       - OIPFS_REPOSITORY_PATH=/repo
     volumes:
-      - ../:/repo:ro
+      - ./repo:/repo:ro
 volumes:
   ipfs_data:
