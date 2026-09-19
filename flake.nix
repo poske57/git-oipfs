@@ -29,6 +29,8 @@
           packages = with pkgs; [
             go
             cargo
+            rustc
+            rustfmt
           ];
         };
       });
