@@ -1,37 +1,61 @@
-use std::env;
 use std::error::Error;
 use std::fmt;
+use std::env;
 use std::time::Duration;
+use serde::Deserialize;
+use std::path::Path;
 
 use gix::{ObjectId, Repository};
-use tracing::{error, info};
+
+use tracing::{error, info, debug};
+use tracing_subscriber::EnvFilter;
+
+const DEFAULT_CONFIG_PATH: String = "/oipfs_config";
 
 fn main() {
+    // Logging
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("debug")),
         )
         .init();
 
-    let settings = match Settings::load() {
-        Ok(s) => s,
-        Err(e) => {
-            error!(err = %e, "Failed to load settings");
-            std::process::exit(1);
-        }
-    };
+    // Load config
+    info!("Load config")
+    let config = read_raw_config()
+    let config: Config;
+    if let Ok(c) = load_config() {
+        config = c;
+    } else {
+        error!(err = %e, "Failed to load settings");
+        std::process::exit(1);
+    }
 
     loop {
         info!("Start periodic reconciliation.");
         if let Err(e) = reconciliation(&settings) {
             error!(err = %e, "Reconciliation failed.");
         }
-        std::thread::sleep(Duration::from_secs(
-            settings.reconciliation_cycle * 60,
-        ));
+        std::thread::sleep(Duration::from_secs(config.reconciliation_cycle * 60));
     }
 }
+
+fn read_raw_config() -> String {
+    let config_path = env.var("OIPFS_CONFIG_PATH").unwrap_or(DEFAULT_CONFIG_PATH);
+    let mut file = File::open(file_path)
+        .inspect_err(|err| {
+            error!("Config file not found: {}", err);
+        })
+        .expect("Config file not found.");
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)
+        .inspect_err(|err| {
+            error!("Config file must be readable: {}", err);
+        })
+        .expect("Config file must be readable.");
+    contents
+
 
 fn reconciliation(s: &Settings) -> Result<(), Box<dyn Error>> {
     let repo = clone_if_not_exist(s)?;
@@ -41,7 +65,6 @@ fn reconciliation(s: &Settings) -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    // IPFS
     Ok(())
 }
 
@@ -163,10 +186,8 @@ fn clone_if_not_exist(s: &Settings) -> Result<Repository, Box<dyn Error>> {
         Ok(repo) => Ok(repo),
         Err(_) => {
             let should_interrupt = std::sync::atomic::AtomicBool::new(false);
-            let mut prepare_fetch = gix::prepare_clone(
-                s.repository_url.clone(),
-                &s.repository_path,
-            )?;
+            let mut prepare_fetch =
+                gix::prepare_clone(s.repository_url.clone(), &s.repository_path)?;
             let (mut prepare_checkout, _outcome) =
                 prepare_fetch.fetch_then_checkout(gix::progress::Discard, &should_interrupt)?;
             let (repo, _outcome) =
@@ -176,40 +197,26 @@ fn clone_if_not_exist(s: &Settings) -> Result<Repository, Box<dyn Error>> {
     }
 }
 
-struct Settings {
-    repository_path: String,
-    repository_url: String,
-    reconciliation_cycle: u64,
+
+#[derive(Debug, Deserialize)]
+struct Config {
+    git: GitConfig,
+    reconciliation: ReconciliationConfig,
 }
 
-impl Settings {
-    fn load() -> Result<Self, Box<dyn Error>> {
-        let repository_path = env::var("OIPFS_REPOSITORY_PATH")
-            .map_err(|_| EnvironmentVariableNotFound("OIPFS_REPOSITORY_PATH"))?;
-
-        let repository_url = env::var("OIPFS_REPOSITORY_URL")
-            .map_err(|_| EnvironmentVariableNotFound("OIPFS_REPOSITORY_URL"))?;
-
-        let reconciliation_cycle = env::var("OIPFS_RECONCILIATION_CYCLE")
-            .map_err(|_| EnvironmentVariableNotFound("OIPFS_RECONCILIATION_CYCLE"))?
-            .parse::<u64>()
-            .map_err(|e| format!("invalid OIPFS_RECONCILIATION_CYCLE: {e}"))?;
-
-        Ok(Settings {
-            repository_path,
-            repository_url,
-            reconciliation_cycle,
-        })
-    }
+#[derive(Debug, Deserialize)]
+struct ReconciliationConfig {
+    cycle: usize
 }
 
-#[derive(Debug)]
-struct EnvironmentVariableNotFound(&'static str);
-
-impl fmt::Display for EnvironmentVariableNotFound {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "environment variable not found: {}", self.0)
-    }
+#[derive(Debug, Deserialize)]
+struct GitConfig {
+    path: String,
+    url: String,
 }
 
-impl Error for EnvironmentVariableNotFound {}
+fn load_config(text) -> Result<Config, Box<dyn Error>> {
+    let config: Config = toml::from_str(text)?;
+    debug!("Config persed: {:?}", config);
+    config
+}
