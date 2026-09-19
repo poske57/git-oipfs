@@ -3,7 +3,7 @@ use std::error::Error;
 use std::fmt;
 use std::time::Duration;
 
-use git2::{ErrorCode, Repository};
+use gix::{ObjectId, Repository};
 use tracing::{error, info};
 
 fn main() {
@@ -45,92 +45,134 @@ fn reconciliation(s: &Settings) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn is_repository_updated(repo: &Repository) -> Result<bool, git2::Error> {
-    let mut remote = repo.find_remote("origin")?;
+fn is_repository_updated(repo: &Repository) -> Result<bool, Box<dyn Error>> {
+    let remote = repo.find_remote("origin")?;
 
     // TODO: Progress をinfoに表示
-    remote.fetch(&["main"], None, None)?;
+    let should_interrupt = std::sync::atomic::AtomicBool::new(false);
+    let connection = remote.connect(gix::remote::Direction::Fetch)?;
+    connection
+        .prepare_fetch(gix::progress::Discard, Default::default())?
+        .receive(gix::progress::Discard, &should_interrupt)?;
 
-    let fetch_head = repo.find_reference("FETCH_HEAD")?;
-    let fetch_commit = repo.reference_to_annotated_commit(&fetch_head)?;
-    let (analysis, _preference) = repo.merge_analysis(&[&fetch_commit])?;
+    let mut fetch_head = repo.find_reference("refs/remotes/origin/main")?;
+    let fetch_commit = fetch_head.peel_to_id()?.detach();
+    let our_commit = repo.head_id()?.detach();
 
-    if analysis.is_up_to_date() {
+    if our_commit == fetch_commit {
         return Ok(false);
     }
 
-    if analysis.is_fast_forward() {
-        do_fast_forward(repo, &fetch_commit)?;
-        return Ok(true);
+    // `merge_base(our, fetch)` returning `our` means `fetch` is a descendant
+    // of `our` (fast-forwardable). Returning `fetch` means already up-to-date.
+    match repo.merge_base(our_commit, fetch_commit) {
+        Ok(base) if base.detach() == our_commit => {
+            do_fast_forward(repo, fetch_commit)?;
+            Ok(true)
+        }
+        Ok(_) => {
+            do_merge(repo, fetch_commit)?;
+            Ok(true)
+        }
+        // No common ancestry, treat as merge.
+        Err(_) => {
+            do_merge(repo, fetch_commit)?;
+            Ok(true)
+        }
     }
-
-    if analysis.is_normal() {
-        do_merge(repo, &fetch_commit)?;
-        return Ok(true);
-    }
-
-    Err(git2::Error::from_str(
-        "unable to update repository: analysis does not permit pull",
-    ))
 }
 
-fn do_fast_forward(repo: &Repository, fetch_commit: &git2::AnnotatedCommit) -> Result<(), git2::Error> {
+fn do_fast_forward(repo: &Repository, fetch_commit: ObjectId) -> Result<(), Box<dyn Error>> {
     let refname = "refs/heads/main";
     let mut reference = match repo.find_reference(refname) {
         Ok(r) => r,
-        Err(_) => repo.reference(refname, fetch_commit.id(), true, "Fast-forward to fetched main")?,
+        Err(_) => repo.reference(
+            refname,
+            fetch_commit,
+            gix::refs::transaction::PreviousValue::Any,
+            "Fast-forward to fetched main",
+        )?,
     };
 
-    reference.set_target(fetch_commit.id(), "Fast-forward to fetched main")?;
-    repo.set_head(refname)?;
-    repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
+    reference.set_target_id(fetch_commit, "Fast-forward to fetched main")?;
+
+    checkout_head(repo)?;
     Ok(())
 }
 
-fn do_merge(repo: &Repository, fetch_commit: &git2::AnnotatedCommit) -> Result<(), git2::Error> {
-    let our_commit = repo.head()?.peel_to_commit()?;
-    let our_tree = our_commit.tree()?;
+fn do_merge(repo: &Repository, fetch_commit: ObjectId) -> Result<(), Box<dyn Error>> {
+    let our_commit = repo.head_id()?.detach();
 
-    let their_commit = repo.find_commit(fetch_commit.id())?;
-    let their_tree = their_commit.tree()?;
+    let labels = gix::merge::blob::builtin_driver::text::Labels {
+        ancestor: Some("ancestor".as_bytes().into()),
+        current: Some("HEAD".as_bytes().into()),
+        other: Some("origin/main".as_bytes().into()),
+    };
 
-    let ancestor_oid = repo.merge_base(our_commit.id(), their_commit.id())?;
-    let ancestor_tree = repo.find_commit(ancestor_oid)?.tree()?;
-
-    let mut index = repo.merge_trees(&ancestor_tree, &our_tree, &their_tree, None)?;
-
-    if index.has_conflicts() {
-        return Err(git2::Error::from_str(
-            "merge conflicts occurred; manual resolution required",
-        ));
-    }
-
-    let tree_id = index.write_tree_to(repo)?;
-    let tree = repo.find_tree(tree_id)?;
-
-    let sig = repo.signature()?;
-
-    repo.commit(
-        Some("HEAD"),
-        &sig,
-        &sig,
-        "Merge remote branch 'origin/main'",
-        &tree,
-        &[&our_commit, &their_commit],
+    let mut outcome = repo.merge_commits(
+        our_commit,
+        fetch_commit,
+        labels,
+        repo.tree_merge_options()?.into(),
     )?;
 
-    repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
+    if !outcome.tree_merge.conflicts.is_empty() {
+        return Err("merge conflicts occurred; manual resolution required".into());
+    }
+
+    let tree_id = outcome.tree_merge.tree.write()?;
+
+    repo.commit(
+        "HEAD",
+        "Merge remote branch 'origin/main'",
+        tree_id,
+        [our_commit, fetch_commit],
+    )?;
+
+    checkout_head(repo)?;
+    Ok(())
+}
+
+fn checkout_head(repo: &Repository) -> Result<(), Box<dyn Error>> {
+    let tree_id = repo.head_tree_id()?.detach();
+    let mut index = repo.index_from_tree(&tree_id)?;
+
+    let workdir = repo
+        .workdir()
+        .ok_or("cannot checkout: repository has no work tree")?;
+
+    let opts = repo.checkout_options(gix::worktree::stack::state::attributes::Source::IdMapping)?;
+
+    let should_interrupt = std::sync::atomic::AtomicBool::new(false);
+    gix::worktree::state::checkout(
+        &mut index,
+        workdir,
+        repo.objects.clone().into_arc()?,
+        &gix::progress::Discard,
+        &gix::progress::Discard,
+        &should_interrupt,
+        opts,
+    )?;
+
+    index.write(Default::default())?;
     Ok(())
 }
 
 fn clone_if_not_exist(s: &Settings) -> Result<Repository, Box<dyn Error>> {
-    match Repository::open(&s.repository_path) {
+    match gix::open(&s.repository_path) {
         Ok(repo) => Ok(repo),
-        Err(e) if e.code() == ErrorCode::NotFound => {
-            let repo = Repository::clone(&s.repository_url, &s.repository_path)?;
+        Err(_) => {
+            let should_interrupt = std::sync::atomic::AtomicBool::new(false);
+            let mut prepare_fetch = gix::prepare_clone(
+                s.repository_url.clone(),
+                &s.repository_path,
+            )?;
+            let (mut prepare_checkout, _outcome) =
+                prepare_fetch.fetch_then_checkout(gix::progress::Discard, &should_interrupt)?;
+            let (repo, _outcome) =
+                prepare_checkout.main_worktree(gix::progress::Discard, &should_interrupt)?;
             Ok(repo)
         }
-        Err(e) => Err(e.into()),
     }
 }
 

@@ -4,6 +4,15 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-git2 = { version = "0.19", features = ["vendored-libgit2", "vendored-openssl"] }
+gix = { version = "0.87", default-features = false, features = [
+    "blob-diff",
+    "revision",
+    "merge",
+    "max-performance-safe",
+    "sha1",
+    "blocking-network-client",
+    "blocking-http-transport-reqwest-rust-tls",
+    "worktree-mutation",
+] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
