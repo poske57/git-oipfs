@@ -2,18 +2,26 @@ package main
 
 import (
 	"errors"
-	git "github.com/go-git/go-git/v6"
+	"fmt"
 	"log/slog"
 	"os"
 	"time"
+
+	git "github.com/go-git/go-git/v6"
 )
 
 func main() {
-	ticker := time.NewTicker(15 * time.Minute)
+	settings := &Settings{}
+	if err := settings.loadSettings(); err != nil {
+		slog.Error("Failed to load settings.", "err", err.Error())
+		os.Exit(1)
+	}
+
+	ticker := time.NewTicker(time.Duration(settings.reconciliationCycle) * time.Minute)
 	defer ticker.Stop()
 	for {
 		slog.Info("Start periodic reconciliation.")
-		err := Reconciliation()
+		err := Reconciliation(settings)
 		if err != nil {
 			slog.Error("Reconciliation failed.", "err", err.Error())
 		}
@@ -21,11 +29,8 @@ func main() {
 	}
 }
 
-func Reconciliation() error {
-	initialize()
-	// Check update
-	repositoryPath := os.Getenv("OIPFS_REPOSITORY_PATH")
-	repo, err := git.PlainOpen(repositoryPath)
+func Reconciliation(s *Settings) error {
+	repo, err := cloneIfNotExist(s)
 	if err != nil {
 		return err
 	}
@@ -42,7 +47,6 @@ func Reconciliation() error {
 
 	// IPFS
 	return nil
-
 }
 
 func isRepositoryUpdated(repo *git.Repository) (bool, error) {
@@ -67,36 +71,56 @@ func isRepositoryUpdated(repo *git.Repository) (bool, error) {
 	return true, nil
 }
 
-func cloneIfNotExist() (repo, error) {
-	repositoryPath := os.Getenv("OIPFS_REPOSITORY_PATH")
-
-	_, err := git.PlainOpen(repositoryPath)
-
+func cloneIfNotExist(s *Settings) (*git.Repository, error) {
+	repo, err := git.PlainOpen(s.repositoryPath)
 	if errors.Is(err, git.ErrRepositoryNotExists) {
-		_, err := git.PlainClone(repositoryPath, &git.CloneOptions{
-			URL:           "https://github.com//example.git",
-			ReferenceName: "refs/heads/develop",
+		return git.PlainClone(s.repositoryPath, &git.CloneOptions{
+			URL:           s.repositoryUrl,
 			SingleBranch:  true,
+			ReferenceName: "refs/heads/main",
 			Progress:      os.Stdout,
 		})
-		if err != nil {
-			return err
-		}
 	}
-	return nil
+	if err != nil {
+		return nil, err
+	}
+	return repo, nil
 }
 
 type Settings struct {
-	repository          *git.Repository
+	repositoryPath      string
 	repositoryUrl       string
 	reconciliationCycle int
 }
 
 func (s *Settings) loadSettings() error {
-	// repository
 	repositoryPath := os.Getenv("OIPFS_REPOSITORY_PATH")
-	// TODO: print custom error and panic
 	if repositoryPath == "" {
-		slog.Error("You must set OIPFS_REPOSITORY_PATH")
+		return EnvironmentVariableNotFound{variableName: "OIPFS_REPOSITORY_PATH"}
 	}
+	s.repositoryPath = repositoryPath
+
+	repositoryUrl := os.Getenv("OIPFS_REPOSITORY_URL")
+	if repositoryUrl == "" {
+		return EnvironmentVariableNotFound{variableName: "OIPFS_REPOSITORY_URL"}
+	}
+	s.repositoryUrl = repositoryUrl
+
+	reconciliationCycle := os.Getenv("OIPFS_RECONCILIATION_CYCLE")
+	if reconciliationCycle == "" {
+		return EnvironmentVariableNotFound{variableName: "OIPFS_RECONCILIATION_CYCLE"}
+	}
+	if _, err := fmt.Sscanf(reconciliationCycle, "%d", &s.reconciliationCycle); err != nil {
+		return fmt.Errorf("invalid OIPFS_RECONCILIATION_CYCLE: %w", err)
+	}
+
+	return nil
+}
+
+type EnvironmentVariableNotFound struct {
+	variableName string
+}
+
+func (e EnvironmentVariableNotFound) Error() string {
+	return fmt.Sprintf("environment variable not found: %v", e.variableName)
 }
