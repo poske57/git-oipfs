@@ -1,29 +1,22 @@
 # syntax=docker/dockerfile:1
 
 # ---- Build stage ----
-FROM docker.io/rust:1.86 AS build
+FROM docker.io/library/rust:1 AS build
 
 WORKDIR /build
 
-# libgit2 requires openssl and cmake
-RUN apt-get update && apt-get install -y --no-install-recommends cmake && rm -rf /var/lib/apt/lists/*
-
-# Cache dependency downloads
-COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && echo 'fn main() {}' > src/main.rs && cargo fetch
-
 # Build the binary
-COPY src ./src
-RUN cargo build --release && cp target/release/git-oipfs /out/git-oipfs
+COPY ./ ./
+RUN cargo build --release
+RUN mkdir /out
+RUN ls target/release/ -la
+COPY target/release/git-oipfs /out/oipfs
 
 # ---- Runtime stage ----
 FROM gcr.io/distroless/static-debian12:nonroot
 
 WORKDIR /app
 
-COPY --from=build /out/git-oipfs /app/git-oipfs
+COPY --from=build /out/oipfs /app/oipfs
 
-# Repository path to watch (mounted from the host)
-ENV OIPFS_REPOSITORY_PATH=/repo
-
-ENTRYPOINT ["/app/git-oipfs"]
+ENTRYPOINT ["/app/oipfs"]
